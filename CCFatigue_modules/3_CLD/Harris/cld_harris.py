@@ -27,8 +27,81 @@ UCS = 27.1
 UTS = 27.7
 CRITICAL_STRESS_RATIO = 0.1
 
+BOUNDS_MARGIN = 0.99
+
 # Cycles for the isolines (the lines of the CLD)
 CYCLES_COUNT = [10**x for x in range(3, 10)]  # = 1e3, 1e4, ..., 1e9
+
+
+def calculate_stress_amplitude(stress_ratio: float, max_stress: float) -> float:
+    """
+    Calculate stress_amplitude (sigma_a) for given stress ratio (R) and max stress
+    Src: https://github.com/EPFL-ENAC/CCFatiguePlatform/blob/develop/CCFatigue_modules/3_CLD/Harris/CLD-Harris.for#L68
+    - lines 68-74
+    Inputs:
+    - stress_ratio (R)
+    - max_stress (sigma_max)
+    Output:
+    - stess amplitude sigma_a
+    """
+    if abs(stress_ratio) > 1:
+        stress_amplitude = (1 - (1 / stress_ratio)) * max_stress / 2
+    else:
+        stress_amplitude = (1 - stress_ratio) * max_stress / 2
+    return stress_amplitude
+
+
+def calculate_stress_mean(stress_ratio: float, max_stress: float) -> float:
+    """
+    Calculate mean stress (sigma_mean) for given stress ratio (R) and max stress
+    Src: https://github.com/EPFL-ENAC/CCFatiguePlatform/blob/develop/CCFatigue_modules/3_CLD/Harris/CLD-Harris.for#L68
+    - lines 68-74
+    Inputs:
+    - stress_ratio (R)
+    - max_stress (sigma_max)
+    - uts
+    - ucs
+    Output:
+    - mean stress sigma_mean
+    """
+    if abs(stress_ratio) > 1:
+        sigma_mean = (1 - (1 / stress_ratio)) * max_stress / 2
+    else:
+        sigma_mean = (1 + stress_ratio) * max_stress / 2
+
+    return sigma_mean
+
+
+def bounds_stress_mean(sigma_mean, uts: float, ucs: float, margin: float) -> float:
+    """
+    Apply bounds (uts, ucs) to mean stress (sigma_mean)
+    Src: https://github.com/EPFL-ENAC/CCFatiguePlatform/blob/develop/CCFatigue_modules/3_CLD/Harris/CLD-Harris.for#L86
+    - lines 86-95
+    Inputs:
+    - sigma_mean
+    - uts (upper bound)
+    - ucs (lower bound)
+    - margin
+    Output:
+    - mean stress sigma_mean
+    """
+    if sigma_mean > uts:
+        sigma_mean = margin * uts
+    if sigma_mean < -ucs:
+        sigma_mean = margin * -ucs
+
+    return sigma_mean
+
+
+def calculate_uvf():
+    """
+    Calculate u, v and f
+    Src: https://github.com/EPFL-ENAC/CCFatiguePlatform/blob/develop/CCFatigue_modules/3_CLD/Harris/CLD-Harris.for#L79
+    - lines 79-135
+    Inputs:
+    Outputs:
+    - (u, v, f)
+    """
 
 
 if __name__ == "__main__":
@@ -48,9 +121,6 @@ if __name__ == "__main__":
             [
                 "stress_ratio_id",
                 "stress_ratio",
-                # "log10_stress_parameter",
-                # "log10_number_of_cycles",
-                # "number_of_cycles",
             ]
         ]
         .groupby(["stress_ratio_id"])
@@ -62,34 +132,27 @@ if __name__ == "__main__":
         print("Input data is not enough to apply Haris' method.")
         exit()
 
-    # For each samples with abs(stress_ratio) > 1,
-    #     calculate the amplitude and mean stress
-    SNC_df.loc[abs(SNC_df.stress_ratio) > 1, "stress_amplitude"] = (
-        (1 - (1 / SNC_df.stress_ratio)) * SNC_df.stress_parameter / 2
-    )
-    SNC_df.loc[abs(SNC_df.stress_ratio) > 1, "mean_stress"] = (
-        -(1 + (1 / SNC_df.stress_ratio)) * SNC_df.stress_parameter / 2
+    # Calculate sigma amplitude
+    SNC_df["stress_amplitude"] = SNC_df.apply(
+        lambda x: calculate_stress_amplitude(x.stress_ratio, x.stress_parameter), axis=1
     )
 
-    # For each samples with abs(stress_ratio) <= 1,
-    #     calculate the amplitude and mean stress
-    SNC_df.loc[abs(SNC_df.stress_ratio) <= 1, "stress_amplitude"] = (
-        (1 - SNC_df.stress_ratio) * SNC_df.stress_parameter / 2
-    )
-    SNC_df.loc[abs(SNC_df.stress_ratio) <= 1, "mean_stress"] = (
-        (1 + SNC_df.stress_ratio) * SNC_df.stress_parameter / 2
+    # Calculate mean sigma
+    SNC_df["stress_mean"] = SNC_df.apply(
+        lambda x: calculate_stress_mean(x.stress_ratio, x.stress_parameter),
+        axis=1,
     )
 
-    # If mean_stress > UTS => mean_stress = 0.99 UTS
-    SNC_df.loc[SNC_df.mean_stress > UTS, "mean_stress"] = 0.99 * UTS
-
-    # If mean_stress < -UCS => mean_stress = 0.99 * -UCS
-    SNC_df.loc[SNC_df.mean_stress < -UCS, "mean_stress"] = 0.99 * -UCS
+    # Apply bounds to mean sigma
+    SNC_df["stress_mean"] = SNC_df.apply(
+        lambda x: bounds_stress_mean(x.stress_mean, UTS, UCS, BOUNDS_MARGIN),
+        axis=1,
+    )
 
     SNC_df["y"] = SNC_df.apply(lambda x: math.log10(x.stress_amplitude / UTS), axis=1)
-    SNC_df["x1"] = SNC_df.apply(lambda x: math.log10(1 - (x.mean_stress / UTS)), axis=1)
+    SNC_df["x1"] = SNC_df.apply(lambda x: math.log10(1 - (x.stress_mean / UTS)), axis=1)
     SNC_df["x2"] = SNC_df.apply(
-        lambda x: math.log10((UCS / UTS) + (x.mean_stress / UTS)), axis=1
+        lambda x: math.log10((UCS / UTS) + (x.stress_mean / UTS)), axis=1
     )
 
     cycles_df = pd.DataFrame(
@@ -146,13 +209,13 @@ if __name__ == "__main__":
             C3 = ((UCS / UTS) + (sm / UTS)) ** vv
 
             stress_amplitude = C2 * C3 * UTS
-            mean_stress = sm
+            stress_mean = sm
 
             row = pd.DataFrame(
                 {
                     "cycles_to_failure": [onc],
                     "stress_amplitude": [stress_amplitude],
-                    "mean_stress": [mean_stress],
+                    "stress_mean": [stress_mean],
                 }
             )
 
